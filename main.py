@@ -33,6 +33,23 @@ app.add_middleware(
 # Initialize retriever state
 retriever = None
 
+# Load persisted Chroma vector store if it exists
+def initialize_vectorstore():
+    global retriever
+    persist_directory = "./chroma_db"
+    if os.path.exists(persist_directory):
+        try:
+            embedding = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+            vectorstore = Chroma(persist_directory=persist_directory, embedding_function=embedding)
+            retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 10})
+            print("Retriever initialized from persisted vector store.")
+        except Exception as e:
+            print(f"Error loading vector store: {e}")
+    else:
+        print("Persisted vector store not found.")
+
+initialize_vectorstore()
+
 class QueryRequest(BaseModel):
     input_query: str
 
@@ -78,9 +95,6 @@ async def upload_file(file: UploadFile):
         else:
             raise ValueError("Unsupported file type")
 
-
-
-        # data = loader.load()
         os.remove(temp_file_path)
 
         if not data:
@@ -92,12 +106,12 @@ async def upload_file(file: UploadFile):
 
         # Create Chroma DB vector store
         global retriever
+        embedding = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         vectorstore = Chroma.from_documents(
             documents=docs,
-            embedding=GoogleGenerativeAIEmbeddings(model="models/embedding-001"),
-            persist_directory="./chroma_db",
+            embedding=embedding,
+            persist_directory="./chroma_db",  # Persistence is automatic
         )
-
         retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 10})
         return {"message": "File processed successfully."}
 
@@ -145,5 +159,5 @@ async def query_model(request: QueryRequest):
 def health_check():
     return {"status": "ok"}
 
-if __name__ =='__main__':
-    uvicorn.run(app,host='0.0.0.0',port=8000)
+if __name__ == '__main__':
+    uvicorn.run(app, host='0.0.0.0', port=8000)
