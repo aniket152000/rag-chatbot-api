@@ -15,6 +15,7 @@ import shutil
 from typing import Optional
 from pydantic import BaseModel
 import uvicorn
+from typing import List
 
 # Load environment variables
 load_dotenv()
@@ -53,70 +54,83 @@ initialize_vectorstore()
 class QueryRequest(BaseModel):
     input_query: str
 
-@app.post("/upload-file/")
-async def upload_file(file: UploadFile):
+@app.post("/upload-files/")
+async def upload_files(files: List[UploadFile]):
+    processed_files = []  # Accumulate document chunks across all files
     try:
-        # Save file temporarily
-        temp_file_path = f"./temp_{file.filename}"
-        with open(temp_file_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+        for file in files:
+            temp_file_path = f"./temp_{file.filename}"
+            try:
+                # Save file temporarily
+                with open(temp_file_path, "wb") as f:
+                    shutil.copyfileobj(file.file, f)
 
-        # Determine file type and load accordingly
-        if file.filename.endswith(".pdf"):
-            from langchain_community.document_loaders import PyPDFLoader
-            loader = PyPDFLoader(temp_file_path)
-            data = loader.load()
-        elif file.filename.endswith(".txt"):
-            from langchain_community.document_loaders import TextLoader
-            loader = TextLoader(temp_file_path)
-            data = loader.load()
-        elif file.filename.endswith(".docx"):
-            from docx import Document
+                # Determine file type and load accordingly
+                if file.filename.endswith(".pdf"):
+                    from langchain_community.document_loaders import PyPDFLoader
+                    loader = PyPDFLoader(temp_file_path)
+                    data = loader.load()
+                elif file.filename.endswith(".txt"):
+                    from langchain_community.document_loaders import TextLoader
+                    loader = TextLoader(temp_file_path)
+                    data = loader.load()
+                elif file.filename.endswith(".docx"):
+                    from docx import Document
 
-            def load_docx(file_path):
-                document = Document(file_path)
-                text = "\n".join([paragraph.text for paragraph in document.paragraphs])
-                return [{"page_content": text}]
+                    def load_docx(file_path):
+                        document = Document(file_path)
+                        text = "\n".join([paragraph.text for paragraph in document.paragraphs])
+                        return [{"page_content": text}]
 
-            data = load_docx(temp_file_path)
-        elif file.filename.endswith(".ppt"):
-            from pptx import Presentation
+                    data = load_docx(temp_file_path)
+                elif file.filename.endswith(".ppt"):
+                    from pptx import Presentation
 
-            def load_ppt(file_path):
-                presentation = Presentation(file_path)
-                text = []
-                for slide in presentation.slides:
-                    for shape in slide.shapes:
-                        if shape.has_text_frame:
-                            text.append(shape.text)
-                return [{"page_content": "\n".join(text)}]
+                    def load_ppt(file_path):
+                        presentation = Presentation(file_path)
+                        text = []
+                        for slide in presentation.slides:
+                            for shape in slide.shapes:
+                                if shape.has_text_frame:
+                                    text.append(shape.text)
+                        return [{"page_content": "\n".join(text)}]
 
-            data = load_ppt(temp_file_path)
-        else:
-            raise ValueError("Unsupported file type")
+                    data = load_ppt(temp_file_path)
+                else:
+                    raise ValueError(f"Unsupported file type: {file.filename}")
 
-        os.remove(temp_file_path)
+                # Split documents into chunks
+                if data:
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000)
+                    docs = text_splitter.split_documents(data)
+                    processed_files.extend(docs)
+                else:
+                    raise ValueError(f"No data found in the file: {file.filename}")
 
-        if not data:
-            return JSONResponse(status_code=400, content={"message": "No data found in the file."})
-
-        # Split documents into chunks
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000)
-        docs = text_splitter.split_documents(data)
+            finally:
+                # Ensure temporary file is removed
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
 
         # Create Chroma DB vector store
-        global retriever
-        embedding = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-        vectorstore = Chroma.from_documents(
-            documents=docs,
-            embedding=embedding,
-            persist_directory="./chroma_db",  # Persistence is automatic
-        )
-        retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 10})
-        return {"message": "File processed successfully."}
+        if processed_files:
+            embedding = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+            vectorstore = Chroma.from_documents(
+                documents=processed_files,
+                embedding=embedding,
+                persist_directory="./chroma_db",  # Persistence is automatic
+            )
+            global retriever
+            retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 10})
+            return {"message": "All files processed successfully."}
+        else:
+            return JSONResponse(status_code=400, content={"message": "No valid data in uploaded files."})
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"message": f"Error processing file: {str(e)}"})
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"Error processing files: {str(e)}"}
+        )
 
 @app.post("/query/")
 async def query_model(request: QueryRequest):
@@ -143,7 +157,7 @@ async def query_model(request: QueryRequest):
 
         # Set up the question-answer chain
         question_answer_chain = create_stuff_documents_chain(
-            ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", temperature=0),
+            ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0),
             prompt
         )
         rag_chain = create_retrieval_chain(retriever, question_answer_chain)
