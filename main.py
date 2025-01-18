@@ -16,7 +16,7 @@ from typing import Optional
 from pydantic import BaseModel
 import uvicorn
 from typing import List
-from langchain.schema import Document  # Import the Document class
+from langchain.docstore.document import Document  # Import the Document class
 
 # Load environment variables
 load_dotenv()
@@ -61,6 +61,7 @@ async def upload_files(files: List[UploadFile]):
     try:
         for file in files:
             temp_file_path = f"./temp_{file.filename}"
+            documents = []  # Initialize documents for each file, ensuring it exists in all cases
             try:
                 # Save file temporarily
                 with open(temp_file_path, "wb") as f:
@@ -71,15 +72,25 @@ async def upload_files(files: List[UploadFile]):
                     from langchain_community.document_loaders import PyPDFLoader
                     loader = PyPDFLoader(temp_file_path)
                     data = loader.load()
+                    if isinstance(data, list):  # Check if data is a list of Documents
+                        documents = data
+                    else:  # If not, handle it as a dictionary
+                        documents = [Document(page_content=str(doc["page_content"])) for doc in data]
                 elif file.filename.endswith(".txt"):
                     from langchain_community.document_loaders import TextLoader
                     loader = TextLoader(temp_file_path)
                     data = loader.load()
+
+                    # Handle data based on its type
+                    if isinstance(data, dict):  # If data is a dictionary
+                        documents = [Document(page_content=str(value)) for key, value in data.items()]
+                    else:  # If data is a list of strings
+                        documents = [Document(page_content=str(doc)) for doc in data]
                 elif file.filename.endswith(".docx"):
                     from docx import Document as DocxDocument
                     document = DocxDocument(temp_file_path)
                     text = "\n".join([paragraph.text for paragraph in document.paragraphs])
-                    data = [{"page_content": text}]
+                    documents = [Document(page_content=str(text))]
                 elif file.filename.endswith(".ppt"):
                     from pptx import Presentation
                     presentation = Presentation(temp_file_path)
@@ -88,17 +99,14 @@ async def upload_files(files: List[UploadFile]):
                         for shape in slide.shapes:
                             if shape.has_text_frame:
                                 text.append(shape.text)
-                    data = [{"page_content": "\n".join(text)}]
+                    documents = [Document(page_content=str("\n".join(text)))]
                 else:
                     raise ValueError(f"Unsupported file type: {file.filename}")
-
-                # Convert dictionaries to Document objects
-                documents = [Document(page_content=doc["page_content"]) for doc in data]
 
                 # Split documents into chunks
                 if documents:
                     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000)
-                    docs = text_splitter.split_documents(documents)
+                    docs = text_splitter.split_documents(documents)  # Now docs will be properly defined
                     processed_files.extend(docs)
                 else:
                     raise ValueError(f"No data found in the file: {file.filename}")
